@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, field_validator
 
 
@@ -44,11 +46,11 @@ class SuccessResponse(BaseModel):
 
 class PortData(BaseModel):
     host: str
-    socks_port: str
-    http_port: str
+    socks_port: int | None
+    http_port: int | None
     login: str
     password: str
-    end_timestamp_utc: str
+    end_timestamp_utc: datetime
 
 
 class PortResponse(BaseModel):

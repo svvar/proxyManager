@@ -7,13 +7,13 @@ from fastapi import HTTPException, status
 from datetime import datetime, timedelta
 from fastapi import Depends
 
+from config import SECRET_KEY
 from api.schemas.user import User
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
-SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30
 

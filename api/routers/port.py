@@ -1,17 +1,18 @@
 from fastapi import APIRouter, Depends, BackgroundTasks
 
+from api.core.security import get_current_user
 from database.session import get_db, SessionLocal
 from api.schemas.port import PortRequest, PortResponse, ErrorResponse, SuccessResponse, PortData
-from database.operations.port_transactions import (write_request, is_waiting_for_port, set_waiting_for_port, allocate_port,
-                                                   is_same_request, give_port_if_found, check_response_existence, check_rent_already_ended,
-                                                   )
+from database.operations.api_port_transactions import (write_request, is_waiting_for_port, set_waiting_for_port, allocate_port,
+                                                       is_same_request, give_port_if_found, check_response_existence, check_rent_already_ended,
+                                                       )
 
 from api.utils.tasks import end_proxy_port_rent
 
 router = APIRouter()
 
 
-get_current_user = lambda: "user1"
+# get_current_user = lambda: "user1"
 
 
 # TODO define possible responses and codes inside get()
@@ -22,7 +23,7 @@ async def get_proxy_port(
         db=Depends(get_db)
 ):
 
-    same_request_id = await is_same_request(db, port_request, current_user)         # current_user.login
+    same_request_id = await is_same_request(port_request, current_user)         # current_user.login
     if same_request_id:
         port, end_time, response_id = await give_port_if_found(db, same_request_id, port_request.rent_time)
         if port:

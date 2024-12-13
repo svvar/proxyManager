@@ -1,108 +1,20 @@
+import io
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 
+import xlsxwriter
 from aiogram import Router, types, F
-from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 
-from bot.core.callbacks import InlinePageCallback
-from bot.core.storage import db_session
-from database.models import Sellers, Ports, ProxyTypes, Geos
-from database.operations.bot_operations import get_sellers, get_sellers_ports
-
+from database.operations.bot_operations import count_requests, get_ports, get_busy_time_for_port
 from bot.core.states import Statistics
 
 statistics_router = Router()
 
-def _paged_kb(page: int, total_pages: int, objects: list):
-    kb = InlineKeyboardBuilder()
-
-    objects_page_items = objects[page * 10:page * 10 + 10]
-
-    for obj in objects_page_items:
-        if isinstance(obj, Sellers):
-            kb.button(text=obj.mark, callback_data=f'seller_{obj.seller_id}')
-        elif isinstance(obj, Ports):
-            kb.button(text=f'{obj.host}:{obj.socks_port or obj.http_port}:{obj.login}  {"🟢" if obj.is_active else "🔴"}',
-                      callback_data=f'port_{obj.port_id}')
-    kb.adjust(1)
-
-    nav_row = []
-    if page > 0:
-        nav_row.append(types.InlineKeyboardButton(text='⬅️', callback_data=InlinePageCallback(direction='prev',
-                                                                                               action='page').pack()))
-    nav_row.append(types.InlineKeyboardButton(text=f'{page+1}/{total_pages}'))
-    if page < total_pages:
-        nav_row.append(types.InlineKeyboardButton(text='➡️', callback_data=InlinePageCallback(direction='next',
-                                                                                               action='page').pack()))
-
-    kb.row(*nav_row)
-    return kb
-
-
-@statistics_router.callback_query(InlinePageCallback.filter(F.action == 'page'))
-async def inline_kb_switch_page(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-
-    current_state = state.get_state()
-
-    if current_state == Statistics.choosing_seller:
-        page = data.get('sellers_page', 0)
-        content = await get_sellers(db_session)
-    elif current_state == Statistics.choosing_port:
-        page = data.get('ports_page', 0)
-        content = await get_sellers_ports(db_session, data['seller_id'])
-
-    total_pages = len(content) // 10
-    callback_data = InlinePageCallback.unpack(callback.data)
-    if callback_data['direction'] == 'next':
-        total_pages += 1
-    else:
-        total_pages -= 1
-
-    kb = _paged_kb(page, total_pages, content)
-
-    if current_state == Statistics.choosing_seller:
-        await state.update_data(sellers_page=page)
-    elif current_state == Statistics.choosing_port:
-        await state.update_data(ports_page=page)
-    await callback.answer()
-    await callback.message.edit_caption(reply_markup=kb.as_markup())
-
-
 
 @statistics_router.message(F.text == 'Статистика')
-async def statistics_menu(message: types.Message, state: FSMContext):
-    await message.answer("Виберіть селлера і порт щоб переглянути статистику по ньому")
-
-    sellers = await get_sellers(db_session)
-    seller_pages = len(sellers) // 10
-
-    await state.update_data(sellers_page=0)
-
-    kb = _paged_kb(0, seller_pages, sellers)
-    await message.answer('Виберіть селлера, порти якого ви хочете переглянути', reply_markup=kb.as_markup())
-    await state.set_state(Statistics.choosing_seller)
-
-
-@statistics_router.callback_query(Statistics.choosing_seller)
-async def select_port(callback: types.CallbackQuery, state: FSMContext):
-    seller_id = int(callback.data.split('_')[-1])
-    await state.update_data(seller_id=seller_id)
-
-    ports = await get_sellers_ports(db_session, seller_id)
-
-    kb = _paged_kb(0, len(ports) // 10, ports)
-    await state.update_data(ports_page=0)
-
-    await callback.answer()
-    await callback.message.edit_text("Виберіть порт", reply_markup=kb.as_markup())
-
-
-@statistics_router.callback_query(Statistics.choosing_port)
-async def select_time_period(callback: types.CallbackQuery, state: FSMContext):
-    port_id = int(callback.data.split('_')[-1])
-    await state.update_data(port_id=port_id)
-
+async def select_time_period(message: types.Message, state: FSMContext):
     kb = InlineKeyboardBuilder()
     kb.button(text='За сьогодні', callback_data='today')
     kb.button(text='За тиждень', callback_data='week')
@@ -110,10 +22,8 @@ async def select_time_period(callback: types.CallbackQuery, state: FSMContext):
     kb.button(text='Свій діапазон', callback_data='custom')
     kb.adjust(1)
 
-    await callback.answer()
-    await callback.message.edit_text('Виберіть період', reply_markup=kb.as_markup())
+    await message.answer('Виберіть період', reply_markup=kb.as_markup())
     await state.set_state(Statistics.choosing_time_period)
-
 
 
 @statistics_router.callback_query(Statistics.choosing_time_period, F.data == 'custom')
@@ -139,13 +49,13 @@ async def save_custom_period(message: types.Message, state: FSMContext):
 @statistics_router.callback_query(Statistics.choosing_time_period)
 async def save_date(callback: types.CallbackQuery, state: FSMContext):
     if callback.data == 'today':
-        start = end = date.today()
+        start = end = datetime.utcnow().replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=ZoneInfo('UTC'))
     elif callback.data == 'week':
-        start = date.today()
-        end = start - timedelta(days=7)
+        end = datetime.utcnow().replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=ZoneInfo('UTC'))
+        start = end - timedelta(days=7)
     elif callback.data == 'month':
-        start = date.today()
-        end = start - timedelta(days=30)
+        end = datetime.utcnow().replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=ZoneInfo('UTC'))
+        start = end - timedelta(days=30)
 
     await callback.answer()
     await state.update_data(start_date=start, end_date=end)
@@ -154,9 +64,84 @@ async def save_date(callback: types.CallbackQuery, state: FSMContext):
 
 async def show_statistics(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    port_id = data['port_id']
     start = data['start_date']
     end = data['end_date']
 
-    await message.answer(f'Статистика по порту {port_id} за період з {start} по {end}')
+    total_time_in_range = (end - start).total_seconds()
+
+    requests = await count_requests(start, end)
+
+    await message.answer(f'Загальний час: {total_time_in_range}\nКількість запитів: {requests}')
+    await state.clear()
+    all_ports = await get_ports()
+    ports_data = {}
+    for port in all_ports:
+        busy_time = await get_busy_time_for_port(start, end, port.port_id)
+        busy_time = int(busy_time)
+        ports_data[port.port_id] = {"busy_time": seconds_to_time(busy_time),
+                                    "free_time": seconds_to_time(total_time_in_range - busy_time),
+                                    "host": port.host,
+                                    "http_port": port.http_port,
+                                    "socks_port": port.socks_port}
+
+    buffer = write_statistics_to_xlsx(f"{start.strftime('%d.%m.%Y')} - {end.strftime('%d.%m.%Y')}", requests, ports_data)
+    input_file = types.BufferedInputFile(buffer.getvalue(), filename='statistics.xlsx')
+    await message.answer_document(input_file)
+    await state.clear()
+
+
+def write_statistics_to_xlsx(date_range: str, requests:int, ports_data: dict):
+    buffer = io.BytesIO()
+    buffer.name = 'statistics.xlsx'
+
+    workbook = xlsxwriter.Workbook(buffer)
+    worksheet = workbook.add_worksheet()
+
+    head_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 14,'bold': True})
+    bold_table_head_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bg_color': '#e3e538', 'border': 2, 'font_size': 12, 'bold': True})
+    normal_format = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_size': 12})
+
+    worksheet.merge_range('A1:F2', f'Статистика за {date_range}', head_format)
+    worksheet.merge_range('B4:C4', 'Кількість запитів', bold_table_head_format)
+    worksheet.write('D4', requests, bold_table_head_format)
+
+    worksheet.merge_range('A6:D6', 'Порт', bold_table_head_format)
+    worksheet.merge_range('E6:E7', 'Час роботи', bold_table_head_format)
+    worksheet.merge_range('F6:F7', 'Час простою', bold_table_head_format)
+    worksheet.write('A7', 'ID', bold_table_head_format)
+    worksheet.write('B7', 'Хост', bold_table_head_format)
+    worksheet.write('C7', 'HTTP порт', bold_table_head_format)
+    worksheet.write('D7', 'SOCKS порт', bold_table_head_format)
+
+    for row, port_id in enumerate(ports_data.keys(), start=8):
+        worksheet.write(f'A{row}', port_id, normal_format)
+        worksheet.write(f'B{row}', ports_data[port_id]['host'], normal_format)
+        worksheet.write(f'C{row}', ports_data[port_id]['http_port'], normal_format)
+        worksheet.write(f'D{row}', ports_data[port_id]['socks_port'], normal_format)
+        worksheet.write(f'E{row}', ports_data[port_id]['busy_time'], normal_format)
+        worksheet.write(f'F{row}', ports_data[port_id]['free_time'], normal_format)
+
+    worksheet.autofit()
+    worksheet.set_column('A:A', width=8)
+    workbook.close()
+
+    return buffer
+
+
+def seconds_to_time(input_seconds: int):
+    hours, remainder = divmod(input_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    text = ""
+    if hours:
+        text += f"{hours}г "
+    if minutes:
+        text += f"{minutes}хв "
+    if seconds:
+        text += f"{seconds}с"
+    if not input_seconds:
+        text = "0с"
+
+    return text
+
+
 

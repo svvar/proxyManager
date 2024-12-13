@@ -1,45 +1,59 @@
-from contextlib import asynccontextmanager
+import asyncio
+import argparse
+import asyncio
+import ipaddress
+import sys
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-
-from fastapi import FastAPI
-from api.routers.auth import router as auth_router
-from api.routers.port import router as v1_router
-from api.utils.tasks import waiting_requests_check, handle_expired_port_rents
-from dotenv import load_dotenv, find_dotenv
-
-from database.session import SessionLocal
+from bot.bot_main import start_bot
+from api.api_main import run_uvicorn_from_async
 
 
-load_dotenv(find_dotenv())
+def validate_port(port_str):
+    try:
+        port = int(port_str)
+        if 1 <= port <= 65535:
+            return port
+        else:
+            raise argparse.ArgumentTypeError(f"Port number must be between 1 and 65535, got {port}.")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Port must be an integer, got '{port_str}'.")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    scheduler = AsyncIOScheduler()
-    scheduler.start()
-    session_for_checks = SessionLocal()
-    scheduler.add_job(waiting_requests_check, "interval", seconds=5, args=[session_for_checks])
-    scheduler.add_job(handle_expired_port_rents, "interval", seconds=10, args=[session_for_checks])
-    yield
-
-    await session_for_checks.close()
-    scheduler.shutdown()
+def validate_host(host_str):
+    try:
+        ipaddress.ip_address(host_str)
+        return host_str
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Host '{host_str}' is not a valid IP address.")
 
 
-app = FastAPI(lifespan=lifespan)
-app.include_router(auth_router, prefix="/auth", tags=["auth"])
-app.include_router(v1_router, prefix="", tags=["v1"])
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Asynchronous App with Optional Host and Port Parameters.")
+
+    parser.add_argument(
+        '--host',
+        type=validate_host,
+        default='127.0.0.1',
+        help='Host address'
+    )
+
+    parser.add_argument(
+        '--port',
+        type=validate_port,
+        default=8000,
+        help='Port number'
+    )
+
+    return parser.parse_args()
 
 
-@app.get("/")
-async def root():
-    return {"message": "Hello I'm proxy manager"}
-
+async def main(args):
+    await asyncio.gather(
+        run_uvicorn_from_async(args.host, args.port),
+        start_bot(),
+    )
 
 if __name__ == "__main__":
-    import uvicorn
-
-    # For development purposes
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    args = parse_arguments()
+    asyncio.run(main(args))

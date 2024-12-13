@@ -1,11 +1,11 @@
 from datetime import timedelta, datetime
 
-from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, insert, update, delete, or_, func, exists, and_
-from sqlalchemy.dialects.postgresql import insert as upsert_insert
+from sqlalchemy.dialects.sqlite import insert as upsert_insert
 
 from database import models
+from database.session import SessionLocal
 from api.schemas.port import PortRequest
 from database.enums import RequestStatus, ResponseStatus
 
@@ -25,8 +25,8 @@ async def write_request(session: AsyncSession, request: PortRequest, requester_l
         return result.scalars().first()
 
 
-async def is_same_request(session: AsyncSession, request: PortRequest, requester_login: str):
-    async with session:
+async def is_same_request(request: PortRequest, requester_login: str):
+    async with SessionLocal() as session:
         result = await session.execute(
             select(models.Requests.request_id)
             .where(models.Requests.servername == request.servername)  # type: ignore
@@ -51,17 +51,19 @@ async def allocate_port(session: AsyncSession, request: PortRequest, request_id:
 
         port_query = (
             select(models.Ports)
+            .options()
             .join(models.Geos)
             .where(models.Ports.is_active.is_(True))
             .where(models.Geos.name == request.geo)                                                       # type: ignore
             .where(models.Ports.ip_version == request.ip_version if request.ip_version != 0 else True)
             .where(models.Ports.port_id.notin_(port_subquery))
-            .with_for_update(skip_locked=True)  # Skip ports locked by other transactions
+            # .with_for_update(skip_locked=True)  # Skip ports locked by other transactions
             .limit(1)
         )
 
         port_result = await session.execute(port_query)
         port = port_result.scalar_one_or_none()
+        # port = port_result.scalars().first()
 
         if not port:
             return None, None, None
@@ -95,20 +97,19 @@ async def allocate_port(session: AsyncSession, request: PortRequest, request_id:
         ).returning(models.Responses.response_id, models.Responses.created_at)
 
         response_result = await session.execute(response_insert)
-        response = response_result.scalar_one_or_none()
-        # response_id, response_created_at = response.response_id, response.created_at
+        response_id, created_at = response_result.first()
 
         # Step 5: Create Port Response
         port_response_insert = insert(models.PortResponses).values(
-            response_id=response.response_id,
+            response_id=response_id,
             port_id=port.port_id,
-            end_timestamp_utc=response.response_created_at + timedelta(seconds=request.rent_time)
+            end_timestamp_utc=created_at + timedelta(seconds=request.rent_time)
         ).returning(models.PortResponses.end_timestamp_utc)
 
         port_response_result = await session.execute(port_response_insert)
         end_timestamp_utc = port_response_result.scalar()
 
-        return port, end_timestamp_utc, response.response_id
+        return port, end_timestamp_utc, response_id
 
 
 async def is_waiting_for_port(session: AsyncSession, client_login: str, request: PortRequest):
@@ -138,7 +139,7 @@ async def give_port_if_found(session: AsyncSession, request_id: int, new_rent_ti
         response_id_subquery = (
             select(models.Responses.response_id)
             .where(models.Responses.parent_request_id == request_id)
-            .subquery()
+            .scalar_subquery()
         )
 
         target_port_response = await session.execute(
@@ -216,12 +217,14 @@ async def check_rent_already_ended(session: AsyncSession, response_id: int):
         return True if result else False
 
 
-async def finish_request_and_response(session: AsyncSession, response_id: int):
+async def finish_request_and_response(response_id: int):
+    session = SessionLocal()
     async with session.begin():
         update_response = await session.execute(
             update(models.Responses)
             .where(models.Responses.response_id == response_id)
-            .values(status=ResponseStatus.FINISHED)
+            .values(status=ResponseStatus.FINISHED,
+                    rent_ended_at=datetime.utcnow())
             .returning(models.Responses.parent_request_id)
         )
 
@@ -232,15 +235,16 @@ async def finish_request_and_response(session: AsyncSession, response_id: int):
             .where(models.Requests.request_id == parent_request_id)
             .values(status=RequestStatus.FINISHED)
         )
+    await session.close()
 
 
-async def get_port_for_rotation(session: AsyncSession, response_id: int):
-    async with session:
+async def get_port_for_rotation(response_id: int):
+    async with SessionLocal() as session:
         port_query = await session.execute(
             select(models.Ports)
             .join(models.PortResponses)
             .join(models.Responses)
-            .where(models.PortResponses.port_id == response_id)
+            .where(models.PortResponses.response_id == response_id)
         )
 
         return port_query.scalar_one_or_none()
@@ -255,7 +259,8 @@ async def get_port_for_rotation(session: AsyncSession, response_id: int):
 #         return result.scalar()
 
 
-async def create_new_ip_info(session: AsyncSession, port_id: int, ip: str, ip_version: int, city: str, region: str, operator: str):
+async def create_new_ip_info(port_id: int, ip: str, ip_version: int, city: str, region: str, operator: str):
+    session = SessionLocal()
     async with session.begin():
         operator_stmt = (
             upsert_insert(models.Operators)
@@ -269,7 +274,7 @@ async def create_new_ip_info(session: AsyncSession, port_id: int, ip: str, ip_ve
         city_stmt = (
             upsert_insert(models.Cities)
             .values(city=city, region=region)
-            .on_conflict_do_update(index_elements=['city', 'region'], set_=dict(city=models.Cities.city, region=models.Cities.region))
+            .on_conflict_do_update(index_elements=['city', 'region'], set_={'city': city, 'region': region})
             .returning(models.Cities.city_id)
         )
         city_result = await session.execute(city_stmt)
@@ -284,10 +289,11 @@ async def create_new_ip_info(session: AsyncSession, port_id: int, ip: str, ip_ve
                 city_id=city_id
             )
         )
+    await session.close()
 
 
-async def delete_port_response(session: AsyncSession, response_id: int):
-    async with session:
+async def delete_port_response(response_id: int):
+    async with SessionLocal() as session:
         await session.execute(
             delete(models.PortResponses)
             .where(models.PortResponses.response_id == response_id)
@@ -301,15 +307,27 @@ async def delete_port_response(session: AsyncSession, response_id: int):
 # Automatic utils
 ######
 
-async def check_waiting_requests(session: AsyncSession):
-    print("Checking for waiting requests...")
-    waiting_requests = await session.execute(
-        select(models.Requests)
-        .where(models.Requests.status == RequestStatus.WAITING_FOR_PORT)        # type: ignore
-        .order_by(models.Requests.created_at.asc(), models.Requests.priority.desc())
-    )
+async def get_waiting_requests():
+    session = SessionLocal()
+    async with session:
+        result = await session.execute(
+            select(models.Requests)
+            .where(models.Requests.status == RequestStatus.WAITING_FOR_PORT)
+        )
 
-    waiting_requests = waiting_requests.all()
+        return result.scalars().all()
+
+async def check_waiting_requests(waiting_requests: list[models.Requests]):
+    session = SessionLocal()
+
+    # print("Checking for waiting requests...")
+    # waiting_requests = await session.execute(
+    #     select(models.Requests)
+    #     .where(models.Requests.status == RequestStatus.WAITING_FOR_PORT)        # type: ignore
+    #     .order_by(models.Requests.created_at.asc(), models.Requests.priority.desc())
+    # )
+    #
+    # waiting_requests = waiting_requests.scalars().all()
 
     check_after_60_sec = []
 
@@ -381,10 +399,12 @@ async def check_waiting_requests(session: AsyncSession):
             port_response = await session.execute(port_response_insert)
             check_after_60_sec.append(port_response.scalar())
 
+    await session.close()
     return check_after_60_sec
 
 
-async def free_missed_port(session: AsyncSession, port_response_id: int):
+async def free_missed_port(port_response_id: int):
+    session = SessionLocal()
     async with session.begin():
         port_response = await session.execute(
             select(models.PortResponses.port_response_id, models.PortResponses.response.id, models.Responses.parent_request_id)
@@ -414,13 +434,15 @@ async def free_missed_port(session: AsyncSession, port_response_id: int):
                 .values(status=RequestStatus.MISSED)
             )
 
+    await session.close()
 
-async def get_expired_responses(session: AsyncSession):
-    async with session:
+
+async def get_expired_responses():
+    async with SessionLocal() as session:
         result = await session.execute(
             select(models.Responses.response_id)
             .join(models.PortResponses)
             .where(models.PortResponses.end_timestamp_utc < datetime.utcnow())
         )
 
-        return result.all()
+        return result.scalars().all()

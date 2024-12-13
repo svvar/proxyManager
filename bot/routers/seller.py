@@ -2,9 +2,9 @@ from aiogram import Router, types, F
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 
-from database.operations.bot_operations import get_ports, get_sellers, add_seller, delete_seller, get_seller
+from database.operations.bot_operations import get_sellers, add_seller, delete_seller
 from bot.core.states import SellerStates
-from bot.core.storage import db_session
+# from bot.core.storage import db_session
 
 
 seller_router = Router()
@@ -25,7 +25,7 @@ async def sellers_menu(message: types.Message):
 
 @seller_router.message(F.text == 'Переглянути селлерів')
 async def show_sellers(message: types.Message):
-    sellers = await get_sellers(db_session)
+    sellers = await get_sellers()
     if not sellers:
         await message.answer('Список селлерів порожній')
         return
@@ -37,14 +37,14 @@ async def show_sellers(message: types.Message):
 
 @seller_router.message(F.text == 'Додати нового селлера')
 async def new_seller(message: types.Message, state: FSMContext):
-    await message.answer('Введіть дані нового селлера через пробіл: mark login password site_link')
+    await message.answer('Введіть дані нового селлера через пробіл:\nmark login password site_link')
     await state.set_state(SellerStates.seller_add_input)
 
 
 @seller_router.message(SellerStates.seller_add_input)
 async def save_seller(message: types.Message, state: FSMContext):
     mark, login, password, site_link = message.text.split()
-    await add_seller(db_session, mark, login, password, site_link)
+    await add_seller(mark, login, password, site_link)
 
     await message.answer('Селлер доданий')
     await state.clear()
@@ -61,7 +61,7 @@ async def remove_seller(message: types.Message, state: FSMContext):
 @seller_router.message(SellerStates.seller_remove_input)
 async def remove_seller_db(message: types.Message, state: FSMContext):
     seller_id = int(message.text)
-    result = await delete_seller(db_session, seller_id)
+    result = await delete_seller(seller_id)
 
     if result:
         await message.answer('Селлер видалений')

@@ -12,7 +12,7 @@ class ShowPorts(StatesGroup):
 
 
 class NewPort(StatesGroup):
-    choosing_ip_version = State()
+    # choosing_ip_version = State()
     choosing_proxy_protocol = State()
     choosing_proxy_type = State()
     choosing_geo = State()
@@ -31,5 +31,15 @@ class Statistics(StatesGroup):
     choosing_port = State()
     choosing_time_period = State()
     input_custom_period = State()
+
+
+class ProxyTypes(StatesGroup):
+    new_type_name = State()
+    del_type_id = State()
+
+
+class Geos(StatesGroup):
+    new_geo_name = State()
+    del_geo_id = State()
 
 

@@ -17,6 +17,14 @@ class Users(Base):
     password = Column(Text, nullable=False)
     is_admin = Column(Boolean, nullable=False)
 
+###################
+# Autosync on/off #
+###################
+
+class SyncStatus(Base):
+    __tablename__ = 'sync_status'
+
+    sync_on = Column(Boolean, primary_key=True, nullable=False, default=False)
 
 #################
 # Proxy related #
@@ -100,6 +108,7 @@ class Responses(Base):
     parent_request_id = Column(Integer, ForeignKey('requests.request_id'))
     ip_info_id = Column(Integer, ForeignKey('ip_info.ip_info_id'))
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    rent_ended_at = Column(DateTime(timezone=True))
     status = Column(Enum(ResponseStatus))
 
     parent_request = relationship('Requests', back_populates='response')
@@ -125,7 +134,7 @@ class Cities(Base):
 
     ip_infos = relationship('IPInfo', back_populates='city')
 
-    UniqueConstraint('city', 'region')
+    __table_args__ = (UniqueConstraint('city', 'region'),)
 
 
 class IPInfo(Base):
